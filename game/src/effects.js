@@ -14,7 +14,11 @@ import * as THREE from 'three';
 const SPARK_COUNT = 240;
 const DECAL_COUNT = 48;
 
-export function createEffects(scene) {
+export function createEffects(scene, viewScene = null) {
+  // The muzzle work belongs to the viewmodel scene when one is given: that scene is drawn after the
+  // post chain with the depth buffer cleared, so the flash is guaranteed to sit on top of the frame
+  // instead of being swallowed by the world's own pass (or occluded by a wall the muzzle pokes into).
+  const flashScene = viewScene ?? scene;
   // --- sparks: one Points cloud, drawn up to `live` -------------------------
   const sparkPos = new Float32Array(SPARK_COUNT * 3);
   const sparkCol = new Float32Array(SPARK_COUNT * 3);
@@ -75,16 +79,33 @@ export function createEffects(scene) {
   }
   let flashCursor = 0;
 
-  const flashQuadMat = new THREE.MeshBasicMaterial({
-    color: 0xffd490, transparent: true, opacity: 0, blending: THREE.AdditiveBlending,
-    depthWrite: false, side: THREE.DoubleSide,
+  // The flash itself is two additive spheres: a small hot core and a larger soft halo.
+  //
+  // A camera-facing quad is the usual choice, but a quad seen edge-on vanishes, and the flash has to
+  // read from whatever angle the shot frame happens to catch. A sphere looks identical from every
+  // direction, so there is nothing to orient and nothing that can disappear.
+  const flashGroup = new THREE.Group();
+  // A local light so the flash actually spills onto the weapon and the player's hands.
+  const flashLight = new THREE.PointLight(0xffd9a0, 0, 6, 2);
+  flashGroup.add(flashLight);
+  const coreMat = new THREE.MeshBasicMaterial({
+    color: 0xfff0d0, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false,
   });
-  const flashQuad = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.5), flashQuadMat);
-  flashQuad.visible = false;
-  scene.add(flashQuad);
+  const haloMat = new THREE.MeshBasicMaterial({
+    color: 0xffb45c, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  // Sized against the viewmodel camera's frustum: at the muzzle's depth the frame's half-height is
+  // ~0.34, so a 0.045 halo reads as a ~7%-of-screen pop. The earlier 0.20 overflowed the frame and
+  // whited out the centre of the picture.
+  const flashCore = new THREE.Mesh(new THREE.SphereGeometry(0.020, 12, 10), coreMat);
+  const flashHalo = new THREE.Mesh(new THREE.SphereGeometry(0.045, 14, 12), haloMat);
+  flashGroup.add(flashCore, flashHalo);
+  flashGroup.visible = false;
+  flashScene.add(flashGroup);
   let quadTtl = 0;
+  let quadLife = 0;
 
-  function muzzleFlash(point, dir, strength = 1) {
+  function muzzleFlash(point, dir, strength = 1, viewPoint = null) {
     const slot = flashLights[flashCursor];
     flashCursor = (flashCursor + 1) % flashLights.length;
     slot.light.position.copy(point);
@@ -93,12 +114,16 @@ export function createEffects(scene) {
     slot.life = 0.05;
     slot.ttl = slot.life;
 
-    flashQuad.position.copy(point).addScaledVector(dir, 0.18);
-    flashQuad.quaternion.copy(cameraForwardQuat(dir));
-    flashQuad.scale.setScalar(0.75 * strength);
-    flashQuad.visible = true;
-    flashQuadMat.opacity = 0.95;
-    quadTtl = 0.045;
+    // The flash lives in the viewmodel scene when there is one, whose camera sits at the origin, so
+    // it takes its own coordinate rather than the world muzzle.
+    flashGroup.position.copy(viewPoint ?? point).addScaledVector(dir, 0.16);
+    flashGroup.scale.setScalar(1.0 + 0.35 * (strength - 1));
+    flashGroup.visible = true;
+    coreMat.opacity = 1.0;
+    haloMat.opacity = 0.75;
+    flashLight.intensity = 14 * strength;
+    quadLife = 0.075;
+    quadTtl = quadLife;
 
     // A few sparks out of the barrel, tinted hot.
     emitSparks(point, dir, 6, [1.0, 0.72, 0.32], 5.5);
@@ -162,7 +187,7 @@ export function createEffects(scene) {
   /** One shot's worth of everything: flash at the muzzle, tracer, sparks and a hole at the hit. */
   function gunshot(muzzle, hitPoint, hitNormal, opts = {}) {
     const dir = hitPoint ? hitPoint.clone().sub(muzzle).normalize() : new THREE.Vector3(0, 0, -1);
-    muzzleFlash(muzzle, dir, opts.strength ?? 1);
+    muzzleFlash(muzzle, dir, opts.strength ?? 1, opts.viewMuzzle ?? null);
     if (hitPoint) {
       tracer(muzzle, hitPoint);
       const n = hitNormal ?? dir.clone().negate();
@@ -206,11 +231,14 @@ export function createEffects(scene) {
       if (slot.ttl <= 0) slot.light.visible = false;
     }
 
-    // Flash quad.
+    // Flash spheres: fade fast, with the halo lingering slightly past the core.
     if (quadTtl > 0) {
       quadTtl -= dt;
-      flashQuadMat.opacity = Math.max(0, quadTtl / 0.045) * 0.95;
-      if (quadTtl <= 0) flashQuad.visible = false;
+      const k = Math.max(0, quadTtl / quadLife);
+      coreMat.opacity = k * k;
+      haloMat.opacity = 0.75 * k;
+      flashLight.intensity = 14 * k * k;
+      if (quadTtl <= 0) flashGroup.visible = false;
     }
 
     // Tracer.
@@ -230,7 +258,7 @@ export function createEffects(scene) {
     traceLive = 0;
     traceGeo.setDrawRange(0, 0);
     for (const slot of flashLights) { slot.ttl = 0; slot.light.visible = false; }
-    flashQuad.visible = false;
+    flashGroup.visible = false;
     for (const m of holes) m.visible = false;
   }
 
@@ -242,7 +270,8 @@ export function createEffects(scene) {
       sparksLive: sparkGeo.drawRange.count,
       sparksCursor: sparkCursor,
       flashesOn: flashLights.filter((s) => s.ttl > 0).length,
-      quadVisible: flashQuad.visible,
+      quadVisible: flashGroup.visible,
+      coreOpacity: coreMat.opacity,
       holesVisible: holes.filter((m) => m.visible).length,
       tracerSegments: traceGeo.drawRange.count / 2,
     };

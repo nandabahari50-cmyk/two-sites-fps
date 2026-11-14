@@ -67,6 +67,9 @@ scene.background = new THREE.Color('#232a33');
 scene.fog = new THREE.Fog(new THREE.Color('#232a33'), 65, 130);
 const camera = new THREE.PerspectiveCamera(76, window.innerWidth / window.innerHeight, 0.05, 200);
 const muzzlePoint = new THREE.Vector3();
+// Where the muzzle sits inside the viewmodel scene, whose camera is at the origin. The gun rests at
+// (0.105, -0.02, REST_Z) with the barrel down -Z, so the flash belongs just past the barrel.
+const viewMuzzlePoint = new THREE.Vector3(0.115, -0.055, -0.62);
 scene.add(camera);
 
 // Image-based lighting. The metalness channel on every material is a lie without an environment to
@@ -193,7 +196,7 @@ const viewGun = new THREE.Group();
 
 // --- Systems ---
 const world = createWorld(scene);
-const effects = createEffects(scene);
+const effects = createEffects(scene, viewScene);
 const postfx = createPostFX(renderer, { ao: true, bloom: true });
 postfx.setCamera(camera);
 postfx.resize(window.innerWidth, window.innerHeight);
@@ -574,6 +577,17 @@ function runShot(name) {
     for (let i = 0; i < 24; i += 1) stepSim(FIXED_STEP);
     firePlayer();
     for (let i = 0; i < 3; i += 1) stepSim(FIXED_STEP);
+    // Second shot into the wall beside the bots, so the frame carries a flash, a tracer and a
+    // spark burst that face the camera rather than the one aimed away from it.
+    {
+      const wallDir = new THREE.Vector3(-0.35, -0.04, -0.94).normalize();
+      player.aimDirection(aimDir);
+      camera.getWorldPosition(eyePoint);
+      const fxMuzzle = eyePoint.clone().addScaledVector(aimDir, 0.55);
+      fxMuzzle.y -= 0.12;
+      const fxHit = eyePoint.clone().addScaledVector(wallDir, 4.2);
+      effects.gunshot(fxMuzzle, fxHit, wallDir.clone().negate(), { strength: 1.0, sparks: 22, viewMuzzle: viewMuzzlePoint });
+    }
     hud.kill('you', 'Rook', true);
     hud.banner('SITE A', 99);
     state.plHint = 'Hold E to plant';
