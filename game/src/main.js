@@ -21,6 +21,8 @@ import { createBomb } from './bomb.js';
 import { createState, TEAM, MONEY_KILL, MONEY_CAP } from './state.js';
 import { configureTextures, environmentTexture, panelMaps, fabricMaps } from './textures.js';
 import { createOperatorKit } from './operator.js';
+import { createPostFX } from './postfx.js';
+import { createEffects } from './effects.js';
 import { WEAPONS, createWeaponState, equip, startReload, stepWeapon, takeRound, spreadOf, scatter, damageFor } from './weapons.js';
 import { buy, menuHtml, BUY_LIST } from './buy.js';
 import { stepBot } from './bots.js';
@@ -53,15 +55,18 @@ renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 // Filmic tone mapping: without it, emissive accents and the key light clip to white and the image
 // reads flat. ACES compresses the highlights so bright surfaces keep their hue.
-renderer.toneMapping = THREE.ACESFilmicToneMapping;
-renderer.toneMappingExposure = 1.18;
-if (THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
+// Tone mapping and the sRGB encode live in the post composite, because drawing to an offscreen
+// target skips both. Doing them twice would double-brighten, so the renderer is left on NoToneMapping
+// and the output space is linear; the composite writes final display values.
+renderer.toneMapping = THREE.NoToneMapping;
+if (THREE.LinearSRGBColorSpace) renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
 document.getElementById('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#232a33');
 scene.fog = new THREE.Fog(new THREE.Color('#232a33'), 65, 130);
 const camera = new THREE.PerspectiveCamera(76, window.innerWidth / window.innerHeight, 0.05, 200);
+const muzzlePoint = new THREE.Vector3();
 scene.add(camera);
 
 // Image-based lighting. The metalness channel on every material is a lie without an environment to
@@ -188,6 +193,10 @@ const viewGun = new THREE.Group();
 
 // --- Systems ---
 const world = createWorld(scene);
+const effects = createEffects(scene);
+const postfx = createPostFX(renderer, { ao: true, bloom: true });
+postfx.setCamera(camera);
+postfx.resize(window.innerWidth, window.innerHeight);
 const hud = createHud();
 hud.mount();
 
@@ -263,6 +272,14 @@ function firePlayer() {
 
   let hitSomething = false;
   let killedSomething = false;
+  let endPoint = null;
+  let endNormal = null;
+  let gotFlesh = false;
+
+  // Where the muzzle actually is in the world: just in front of the camera, low right, so the flash
+  // and the tracer leave the weapon rather than the eye.
+  muzzlePoint.copy(eyePoint).addScaledVector(aimDir, 0.55);
+  muzzlePoint.y -= 0.12;
 
   for (let pellet = 0; pellet < def.pellets; pellet += 1) {
     scatter(aimDir, spread, rand, shotDir);
@@ -273,6 +290,10 @@ function firePlayer() {
       const target = hit.object.userData.bot;
       if (target) {
         hitSomething = true;
+        gotFlesh = true;
+        // Blood-mist tint rather than sparks when a pellet lands on a body.
+        endPoint = hit.point;
+        endNormal = shotDir.clone().negate();
         const part = hit.object.userData.part ?? 'torso';
         if (hurtBot(target, damageFor(def, part), player.side)) {
           killedSomething = true;
@@ -281,9 +302,23 @@ function firePlayer() {
         }
         break;
       }
-      if (hit.object.visible) break; // a wall stops the pellet
+      if (hit.object.visible) {
+        // A wall stops the pellet: sparks and a hole where it struck.
+        endPoint = hit.point;
+        endNormal = hit.face ? hit.face.normal.clone() : shotDir.clone().negate();
+        if (hit.object.matrixWorld) endNormal.transformDirection(hit.object.matrixWorld).normalize();
+        break;
+      }
     }
+    if (endPoint) break;
   }
+
+  const strength = def.pellets > 4 ? 1.25 : 1.0;
+  effects.gunshot(muzzlePoint, endPoint, endNormal, {
+    strength,
+    sparks: gotFlesh ? 14 : 10,
+    tint: gotFlesh ? [0.85, 0.13, 0.10] : [1.0, 0.76, 0.42],
+  });
 
   if (hitSomething) hud.hitMarker(killedSomething);
   const kick = def.recoil * (crouched ? 0.7 : 1);
@@ -300,12 +335,19 @@ function botShoot(bot, jitter) {
   scatter(botAim, jitter, rand, shotDir);
   raycaster.set(botEye, shotDir);
   const hits = raycaster.intersectObjects(shootables, false);
+  // The bot's own muzzle sits at its weapon, so its flash and tracer read from the right place.
+  const botMuzzle = botEye.clone().addScaledVector(shotDir, 0.5);
+  botMuzzle.y -= 0.08;
+  let botHit = null;
+  let botNormal = null;
   for (let i = 0; i < hits.length; i += 1) {
     const hit = hits[i];
     const victimBot = hit.object.userData.bot;
     const part = hit.object.userData.part ?? 'torso';
     const isPlayerBody = hit.object.userData.player === true;
     if (isPlayerBody || (victimBot && victimBot !== bot)) {
+      botHit = hit.point;
+      botNormal = shotDir.clone().negate();
       const dmg = damageFor(def, part) * 0.85;
       if (isPlayerBody) {
         if (player.armour > 0) player.armour = Math.max(0, player.armour - dmg * 0.55);
@@ -459,7 +501,12 @@ function frame(now) {
   player.applyCamera(camera);
   updateHud(elapsed);
 
-  renderer.render(scene, camera);
+  // World through the post chain into the offscreen target, then the viewmodel straight to the
+  // screen on top: the weapon is at the camera, so it has nothing to occlude against and no reason
+  // to be smeared by a screen-space blur.
+  effects.update(elapsed);
+  postfx.setCamera(camera);
+  postfx.renderWorld(scene, camera, elapsed);
   if (!paused) {
     renderer.autoClear = false;
     renderer.clearDepth();
@@ -475,6 +522,8 @@ window.addEventListener('resize', () => {
   viewCamera.aspect = window.innerWidth / window.innerHeight;
   viewCamera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  postfx.resize(window.innerWidth, window.innerHeight);
+  postfx.setCamera(camera);
 });
 
 // --- Boot ---
@@ -559,6 +608,7 @@ function runShot(name) {
   // Measurement bridge, used only by tools/probe_view.py while a shot is being framed: it reports
   // where the viewmodel's parts land in clip space, so a transform can be corrected by arithmetic
   // instead of by eye. Harmless outside a shot because nothing reads it.
+  window.__fx = () => effects.debugState();
   window.__probe = () => {
     const out = { restZ: REST_Z, gunPos: viewGun.position.toArray(),
                   gunRot: [viewGun.rotation.x, viewGun.rotation.y, viewGun.rotation.z], parts: [] };
@@ -584,11 +634,20 @@ function runShot(name) {
   };
   function round3(n) { return Math.round(n * 1000) / 1000; }
 
+
+  // In a shot the effects are frozen, not advanced: the flash and tracer only live ~50 ms, so a
+  // screenshot taken two frames later would show the aftermath with none of the muzzle work. The
+  // freeze keeps whatever the setup's shots emitted on screen for the capture.
+  // Set once the setup's shots have fired, so their flash and tracer stay on screen for the capture.
+  let freezeEffects = true;
   let painted = 0;
   function paint() {
     requestAnimationFrame(paint);
     player.applyCamera(camera);
-    updateHud(FIXED_STEP);    renderer.render(scene, camera);
+    updateHud(FIXED_STEP);
+    if (!freezeEffects) effects.update(FIXED_STEP);
+    postfx.setCamera(camera);
+    postfx.renderWorld(scene, camera, FIXED_STEP);
     renderer.autoClear = false;
     renderer.clearDepth();
     renderer.render(viewScene, viewCamera);

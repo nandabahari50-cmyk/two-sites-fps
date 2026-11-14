@@ -1,0 +1,252 @@
+// Impact and muzzle effects: sparks, muzzle flash, bullet holes, tracers.
+//
+// All of it lives in one pooled system. Nothing is allocated while a round is live: the sparks are a
+// single Points cloud whose live count is a draw range, the flashes are two lights that get moved and
+// timed out, decals are a fixed ring of quads written round-robin. A firefight is then a handful of
+// buffer writes, which matters because this runs on the same thread as the game loop.
+//
+// The muzzle flash is a light plus a camera-facing quad rather than an animated model: at the
+// distances a weapon is seen in a first-person frame, a short bright pop with a falloff reads
+// better than geometry and costs one draw call.
+
+import * as THREE from 'three';
+
+const SPARK_COUNT = 240;
+const DECAL_COUNT = 48;
+
+export function createEffects(scene) {
+  // --- sparks: one Points cloud, drawn up to `live` -------------------------
+  const sparkPos = new Float32Array(SPARK_COUNT * 3);
+  const sparkCol = new Float32Array(SPARK_COUNT * 3);
+  const sparkVel = new Float32Array(SPARK_COUNT * 3);
+  const sparkLife = new Float32Array(SPARK_COUNT);
+  const sparkMax = new Float32Array(SPARK_COUNT);
+
+  const sparkGeo = new THREE.BufferGeometry();
+  sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPos, 3));
+  sparkGeo.setAttribute('color', new THREE.BufferAttribute(sparkCol, 3));
+  sparkGeo.setDrawRange(0, 0);
+
+  const sparkMat = new THREE.PointsMaterial({
+    size: 0.055, vertexColors: true, transparent: true,
+    blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true,
+  });
+  const sparks = new THREE.Points(sparkGeo, sparkMat);
+  sparks.frustumCulled = false;
+  scene.add(sparks);
+
+  let sparkCursor = 0;
+  let sparkLive = 0;
+
+  function emitSparks(point, normal, count, tint, speed = 3.4) {
+    for (let i = 0; i < count; i += 1) {
+      const idx = sparkCursor;
+      sparkCursor = (sparkCursor + 1) % SPARK_COUNT;
+      if (sparkLive < SPARK_COUNT) sparkLive += 1;
+
+      const j = idx * 3;
+      sparkPos[j] = point.x;
+      sparkPos[j + 1] = point.y;
+      sparkPos[j + 2] = point.z;
+
+      // A cone around the surface normal, with a little upward bias so sparks arc.
+      const spread = 0.85;
+      sparkVel[j] = (normal.x + (Math.random() - 0.5) * spread) * speed;
+      sparkVel[j + 1] = (normal.y + (Math.random() - 0.5) * spread) * speed + 1.1;
+      sparkVel[j + 2] = (normal.z + (Math.random() - 0.5) * spread) * speed;
+
+      sparkCol[j] = tint[0];
+      sparkCol[j + 1] = tint[1];
+      sparkCol[j + 2] = tint[2];
+
+      sparkLife[idx] = 0.22 + Math.random() * 0.3;
+      sparkMax[idx] = sparkLife[idx];
+    }
+    sparkGeo.setDrawRange(0, sparkLive);
+  }
+
+  // --- muzzle flash: pool of two lights, reused round-robin -----------------
+  const flashLights = [];
+  for (let i = 0; i < 4; i += 1) {
+    const l = new THREE.PointLight(0xffd9a0, 0, 9, 2);
+    l.visible = false;
+    scene.add(l);
+    flashLights.push({ light: l, ttl: 0, life: 0 });
+  }
+  let flashCursor = 0;
+
+  const flashQuadMat = new THREE.MeshBasicMaterial({
+    color: 0xffd490, transparent: true, opacity: 0, blending: THREE.AdditiveBlending,
+    depthWrite: false, side: THREE.DoubleSide,
+  });
+  const flashQuad = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.5), flashQuadMat);
+  flashQuad.visible = false;
+  scene.add(flashQuad);
+  let quadTtl = 0;
+
+  function muzzleFlash(point, dir, strength = 1) {
+    const slot = flashLights[flashCursor];
+    flashCursor = (flashCursor + 1) % flashLights.length;
+    slot.light.position.copy(point);
+    slot.light.intensity = 22 * strength;
+    slot.light.visible = true;
+    slot.life = 0.05;
+    slot.ttl = slot.life;
+
+    flashQuad.position.copy(point).addScaledVector(dir, 0.18);
+    flashQuad.quaternion.copy(cameraForwardQuat(dir));
+    flashQuad.scale.setScalar(0.75 * strength);
+    flashQuad.visible = true;
+    flashQuadMat.opacity = 0.95;
+    quadTtl = 0.045;
+
+    // A few sparks out of the barrel, tinted hot.
+    emitSparks(point, dir, 6, [1.0, 0.72, 0.32], 5.5);
+  }
+
+  // Build a quaternion that faces a direction; the quad is a billboard in world space.
+  const tmpM = new THREE.Matrix4();
+  const tmpUp = new THREE.Vector3(0, 1, 0);
+  function cameraForwardQuat(dir) {
+    tmpM.lookAt(new THREE.Vector3(0, 0, 0), dir.clone().negate(), tmpUp);
+    return new THREE.Quaternion().setFromRotationMatrix(tmpM);
+  }
+
+  // --- decals: a ring of quads so a wall accumulates holes ------------------
+  const holeGeo = new THREE.PlaneGeometry(0.16, 0.16);
+  const holeMat = new THREE.MeshBasicMaterial({
+    color: 0x0a0a0c, transparent: true, opacity: 0.85, depthWrite: false,
+    polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4,
+  });
+  const holes = [];
+  for (let i = 0; i < DECAL_COUNT; i += 1) {
+    const m = new THREE.Mesh(holeGeo, holeMat);
+    m.visible = false;
+    scene.add(m);
+    holes.push(m);
+  }
+  let holeCursor = 0;
+
+  function bulletHole(point, normal) {
+    const m = holes[holeCursor];
+    holeCursor = (holeCursor + 1) % DECAL_COUNT;
+    m.position.copy(point).addScaledVector(normal, 0.012);
+    m.quaternion.copy(cameraForwardQuat(normal));
+    m.visible = true;
+  }
+
+  // --- tracers: short streaks from the muzzle to the hit -------------------
+  const traceGeo = new THREE.BufferGeometry();
+  const tracePos = new Float32Array(2 * 3 * 12);
+  traceGeo.setAttribute('position', new THREE.BufferAttribute(tracePos, 3));
+  traceGeo.setDrawRange(0, 0);
+  const traceMat = new THREE.LineBasicMaterial({
+    color: 0xffe0a0, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending,
+  });
+  const tracers = new THREE.LineSegments(traceGeo, traceMat);
+  tracers.frustumCulled = false;
+  scene.add(tracers);
+  let traceLive = 0;
+  let traceTtl = 0;
+
+  function tracer(from, to) {
+    const j = traceLive * 6;
+    if (j + 6 > tracePos.length) return;
+    tracePos[j] = from.x; tracePos[j + 1] = from.y; tracePos[j + 2] = from.z;
+    tracePos[j + 3] = to.x; tracePos[j + 4] = to.y; tracePos[j + 5] = to.z;
+    traceLive += 1;
+    traceGeo.setDrawRange(0, traceLive * 2);
+    traceTtl = 0.045;
+  }
+
+  /** One shot's worth of everything: flash at the muzzle, tracer, sparks and a hole at the hit. */
+  function gunshot(muzzle, hitPoint, hitNormal, opts = {}) {
+    const dir = hitPoint ? hitPoint.clone().sub(muzzle).normalize() : new THREE.Vector3(0, 0, -1);
+    muzzleFlash(muzzle, dir, opts.strength ?? 1);
+    if (hitPoint) {
+      tracer(muzzle, hitPoint);
+      const n = hitNormal ?? dir.clone().negate();
+      emitSparks(hitPoint, n, opts.sparks ?? 10, opts.tint ?? [1.0, 0.78, 0.44]);
+      bulletHole(hitPoint, n);
+    }
+  }
+
+  /**
+   * Advance every effect. Sparks fall, decals fade after a while, flash lights time out, tracers
+   * clear. Called once per rendered frame with the frame's dt.
+   */
+  function update(dt) {
+    // Sparks.
+    for (let i = 0; i < sparkLive; i += 1) {
+      if (sparkLife[i] <= 0) continue;
+      sparkLife[i] -= dt;
+      const j = i * 3;
+      sparkVel[j + 1] -= 9.4 * dt;
+      // Air drag so sparks do not fly like bullets.
+      sparkVel[j] *= 0.94;
+      sparkVel[j + 1] *= 0.96;
+      sparkVel[j + 2] *= 0.94;
+      sparkPos[j] += sparkVel[j] * dt;
+      sparkPos[j + 1] += sparkVel[j + 1] * dt;
+      sparkPos[j + 2] += sparkVel[j + 2] * dt;
+      const k = Math.max(0, sparkLife[i] / sparkMax[i]);
+      sparkCol[j] = Math.min(1, sparkCol[j] * (0.9 + 0.1 * k));
+      sparkCol[j + 1] *= 0.965;
+      sparkCol[j + 2] *= 0.955;
+    }
+    sparkGeo.attributes.position.needsUpdate = true;
+    sparkGeo.attributes.color.needsUpdate = true;
+
+    // Muzzle lights.
+    for (const slot of flashLights) {
+      if (slot.ttl <= 0) continue;
+      slot.ttl -= dt;
+      const k = Math.max(0, slot.ttl / slot.life);
+      slot.light.intensity = 22 * k * k;
+      if (slot.ttl <= 0) slot.light.visible = false;
+    }
+
+    // Flash quad.
+    if (quadTtl > 0) {
+      quadTtl -= dt;
+      flashQuadMat.opacity = Math.max(0, quadTtl / 0.045) * 0.95;
+      if (quadTtl <= 0) flashQuad.visible = false;
+    }
+
+    // Tracer.
+    if (traceTtl > 0) {
+      traceTtl -= dt;
+      if (traceTtl <= 0) {
+        traceLive = 0;
+        traceGeo.setDrawRange(0, 0);
+      }
+    }
+  }
+
+  function clear() {
+    sparkLive = 0;
+    sparkCursor = 0;
+    sparkGeo.setDrawRange(0, 0);
+    traceLive = 0;
+    traceGeo.setDrawRange(0, 0);
+    for (const slot of flashLights) { slot.ttl = 0; slot.light.visible = false; }
+    flashQuad.visible = false;
+    for (const m of holes) m.visible = false;
+  }
+
+  // A read-only view of what is live, for the screenshot probe: how many sparks are drawn, whether
+  // a flash light is on, how many bullet holes are placed, whether a tracer is up. Nothing in the
+  // game reads it.
+  function debugState() {
+    return {
+      sparksLive: sparkGeo.drawRange.count,
+      sparksCursor: sparkCursor,
+      flashesOn: flashLights.filter((s) => s.ttl > 0).length,
+      quadVisible: flashQuad.visible,
+      holesVisible: holes.filter((m) => m.visible).length,
+      tracerSegments: traceGeo.drawRange.count / 2,
+    };
+  }
+
+  return { gunshot, muzzleFlash, bulletHole, emitSparks, update, clear, debugState };
+}

@@ -9,6 +9,7 @@
 // Nothing here is decoration: every box is a collider, and every box a bullet can hit.
 import * as THREE from 'three';
 import { concreteMaps, panelMaps, crateMaps, floorMaps, paintMaps } from './textures.js';
+import { addDetail, chamferBox } from './detail.js';
 
 const WALL_COLOR = '#3c4550';
 const FLOOR_COLOR = '#4c545e';
@@ -58,22 +59,22 @@ export function createWorld(scene) {
     wall: new THREE.MeshStandardMaterial({
       color: WHITE, roughness: 0.95, metalness: 0.02,
       map: wallMaps.map, normalMap: wallMaps.normalMap, roughnessMap: wallMaps.roughnessMap,
-      normalScale: new THREE.Vector2(0.85, 0.85),
+      normalScale: new THREE.Vector2(0.45, 0.45),
     }),
     floor: new THREE.MeshStandardMaterial({
       color: WHITE, roughness: 0.9, metalness: 0.05,
       map: floorMaps0.map, normalMap: floorMaps0.normalMap, roughnessMap: floorMaps0.roughnessMap,
-      normalScale: new THREE.Vector2(0.7, 0.7),
+      normalScale: new THREE.Vector2(0.32, 0.32),
     }),
     crate: new THREE.MeshStandardMaterial({
       color: WHITE, roughness: 0.85, metalness: 0.0,
       map: crateMaps0.map, normalMap: crateMaps0.normalMap, roughnessMap: crateMaps0.roughnessMap,
-      normalScale: new THREE.Vector2(1.0, 1.0),
+      normalScale: new THREE.Vector2(0.62, 0.62),
     }),
     platform: new THREE.MeshStandardMaterial({
       color: WHITE, roughness: 0.8, metalness: 0.1,
       map: platformMaps.map, normalMap: platformMaps.normalMap, roughnessMap: platformMaps.roughnessMap,
-      normalScale: new THREE.Vector2(0.9, 0.9),
+      normalScale: new THREE.Vector2(0.5, 0.5),
     }),
     site: new THREE.MeshStandardMaterial({
       color: WHITE, roughness: 0.6, metalness: 0.2,
@@ -236,6 +237,10 @@ export function createWorld(scene) {
   siteLightB.position.set(13.5, 3.2, -24);
   scene.add(siteLightB);
 
+  // Decoration: beams, pipes, cable runs, hanging lamps, kerbs, grates. None of it is a shootable
+  // or a bot path; the colliders it adds are appended to the movement set below.
+  const detail = addDetail(group, { halfW: HALF_W, halfL: HALF_L });
+
   const sites = [
     { id: 'A', center: new THREE.Vector3(-13.5, 0, -24), radius: 4.2 },
     { id: 'B', center: new THREE.Vector3(13.5, 0, -24), radius: 4.2 },
@@ -267,8 +272,11 @@ export function createWorld(scene) {
     mid: [new THREE.Vector3(3.6, 0, -2.4), new THREE.Vector3(-3.6, 0, -2.4)],
   };
 
+  for (const box of detail.extraColliders) colliders.push(box);
+
   return {
     group, colliders, shootables, sites, attackSpawns, defendSpawns, routes, holdPoints,
+    detail,
     padA, padB, halfW: HALF_W, halfL: HALF_L, palette: { accent: ACCENT, wall: WALL_COLOR, site: SITE_COLOR },
   };
 }
