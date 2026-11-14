@@ -10,6 +10,8 @@
 import * as THREE from 'three';
 import { concreteMaps, panelMaps, crateMaps, floorMaps, paintMaps } from './textures.js';
 import { addDetail, chamferBox } from './detail.js';
+import { createGrass } from './grass.js';
+import { addProps } from './props.js';
 
 const WALL_COLOR = '#3c4550';
 const FLOOR_COLOR = '#4c545e';
@@ -240,6 +242,35 @@ export function createWorld(scene) {
   // Decoration: beams, pipes, cable runs, hanging lamps, kerbs, grates. None of it is a shootable
   // or a bot path; the colliders it adds are appended to the movement set below.
   const detail = addDetail(group, { halfW: HALF_W, halfL: HALF_L });
+
+  // Open ground: turf and grass blades on the spawn plateaus and the two side strips, so the map has
+  // an open-air pocket instead of one unbroken concrete floor. Decoration only, never a collider.
+  const grassPatches = [
+    [0, 29, 10, 3],       // attacker spawn field
+    [0, -29.5, 14, 2.5],  // defender spawn field
+    [-14, 6, 3, 6],       // left side strip
+    [14, 6, 3, 6],        // right side strip
+  ];
+  const grass = createGrass(group, { halfW: HALF_W, halfL: HALF_L }, grassPatches);
+
+  // Cover props: barrels and sandbags that double as colliders and shootables.
+  const propPlacements = [
+    // Site A approach and its platform.
+    [-11.5, -17, 0.3, 'barrel'],
+    [-14.5, -20.5, -0.5, 'sandbag'],
+    [-8, -13.5, 1.1, 'barrel'],
+    // Site B approach (mirrored).
+    [11.5, -17, -0.3, 'barrel'],
+    [14.5, -20.5, 0.5, 'sandbag'],
+    [8, -13.5, -1.1, 'barrel'],
+    // Mid connector cover.
+    [-4.5, -0.8, 1.5, 'sandbag'],
+    [4.5, 0.8, -0.4, 'barrel'],
+    // Lane cover on each side.
+    [-13.5, 5, 1.2, 'sandbag'],
+    [13.5, 5, -1.2, 'sandbag'],
+  ];
+  const props = addProps(group, colliders, shootables, propPlacements);
 
   const sites = [
     { id: 'A', center: new THREE.Vector3(-13.5, 0, -24), radius: 4.2 },

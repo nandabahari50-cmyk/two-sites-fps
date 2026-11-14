@@ -79,6 +79,14 @@ export function createOperatorKit(renderer) {
     emissiveIntensity: 0.85,
   });
 
+  // A lit visor so the head reads as a face even at a glance: a dark lens with a soft team-tinted
+  // glow underneath, dimmer than the stripes (a beacon of light on every helmet would look wrong).
+  const visorMat = (side) => new THREE.MeshStandardMaterial({
+    color: 0x11151a, roughness: 0.25, metalness: 0.6,
+    emissive: side === 0 ? 0x3a1000 : 0x00243a,
+    emissiveIntensity: 1.6,
+  });
+
   // Shared geometry: built once, reused by every operator.
   const geo = {
     chest: taper(0.60, 0.66, 0.34, 0.94, 0.80),
@@ -111,6 +119,7 @@ export function createOperatorKit(renderer) {
     const cloth = fabric(side, variant);
     const skin = skinMat(side);
     const accent = accentMat(side);
+    const visorGlow = visorMat(side);
 
     // --- lower body: hips are the root of the leg chain ---
     const hips = new THREE.Group();
@@ -184,7 +193,7 @@ export function createOperatorKit(renderer) {
     const helmetStripe = new THREE.Mesh(geo.helmetStripe, accent);
     helmetStripe.position.set(0, 0.235, 0);
     head.add(helmetStripe);
-    const visor = new THREE.Mesh(geo.visor, rubberMat);
+    const visor = new THREE.Mesh(geo.visor, visorGlow);
     visor.position.set(0, 0.06, 0.16);
     head.add(visor);
 
