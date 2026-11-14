@@ -8,6 +8,7 @@
 //
 // Nothing here is decoration: every box is a collider, and every box a bullet can hit.
 import * as THREE from 'three';
+import { concreteMaps, panelMaps, crateMaps, floorMaps, paintMaps } from './textures.js';
 
 const WALL_COLOR = '#3c4550';
 const FLOOR_COLOR = '#4c545e';
@@ -16,18 +17,81 @@ const PLATFORM_COLOR = '#5a6169';
 const SITE_COLOR = '#a94a36';
 const ACCENT = '#b8863b';
 
+/**
+ * Repeat a texture so one tile covers `worldSize` metres regardless of the mesh's own UVs.
+ *
+ * A BoxGeometry's UVs are 0..1 per face, so a 40-metre wall and a 1-metre crate would show the same
+ * number of tiles and the wall's texture would smear. Scaling `repeat` by the face size is the cheap
+ * fix that works for the axis-aligned boxes this map is built from.
+ */
+function setTile(maps, w, h, d, metres) {
+  // The dominant face of a given box decides its tiling: walls tile by height and length, floors by
+  // their footprint. Using the two largest dimensions keeps tiles square-ish on every box.
+  const dims = [w, h, d].sort((a, b) => b - a);
+  const a = Math.max(0.5, dims[0] / metres);
+  const b = Math.max(0.5, dims[1] / metres);
+  for (const tex of Object.values(maps)) {
+    if (!tex || !tex.repeat) continue;
+    tex.repeat.set(a, b);
+  }
+}
+
 export function createWorld(scene) {
   const group = new THREE.Group();
   scene.add(group);
 
+  // One material per surface kind, each carrying a base colour, a roughness map and a normal map.
+  // The maps are procedural (textures.js), so the surfaces have relief for the light to catch
+  // instead of reading as flat panels. `repeat` on the maps is overwritten per mesh in box().
+  //
+  // material.color stays white wherever a map is present: three.js multiplies the two, so a dark
+  // colour over an already-tinted map would square the darkness. The texture carries the albedo.
+  const wallMaps = concreteMaps({ seed: 1, tint: [0.44, 0.47, 0.51] });
+  const floorMaps0 = floorMaps({ seed: 21, tint: [0.38, 0.40, 0.43] });
+  const crateMaps0 = crateMaps({ seed: 13, tint: [0.55, 0.41, 0.26] });
+  const platformMaps = panelMaps({ seed: 7, tint: [0.42, 0.45, 0.49] });
+  const accentMaps = paintMaps({ seed: 61, tint: [0.70, 0.52, 0.22] });
+  const siteMaps = paintMaps({ seed: 73, tint: [0.66, 0.28, 0.20] });
+  const WHITE = new THREE.Color(0xffffff);
+
   const mats = {
-    wall: new THREE.MeshStandardMaterial({ color: new THREE.Color(WALL_COLOR), roughness: 0.95, metalness: 0.02 }),
-    floor: new THREE.MeshStandardMaterial({ color: new THREE.Color(FLOOR_COLOR), roughness: 0.9, metalness: 0.05 }),
-    crate: new THREE.MeshStandardMaterial({ color: new THREE.Color(CRATE_COLOR), roughness: 0.85, metalness: 0.0 }),
-    platform: new THREE.MeshStandardMaterial({ color: new THREE.Color(PLATFORM_COLOR), roughness: 0.8, metalness: 0.1 }),
-    site: new THREE.MeshStandardMaterial({ color: new THREE.Color(SITE_COLOR), roughness: 0.6, metalness: 0.2 }),
-    accent: new THREE.MeshStandardMaterial({ color: new THREE.Color(ACCENT), roughness: 0.4, metalness: 0.5, emissive: new THREE.Color(ACCENT), emissiveIntensity: 0.25 }),
+    wall: new THREE.MeshStandardMaterial({
+      color: WHITE, roughness: 0.95, metalness: 0.02,
+      map: wallMaps.map, normalMap: wallMaps.normalMap, roughnessMap: wallMaps.roughnessMap,
+      normalScale: new THREE.Vector2(0.85, 0.85),
+    }),
+    floor: new THREE.MeshStandardMaterial({
+      color: WHITE, roughness: 0.9, metalness: 0.05,
+      map: floorMaps0.map, normalMap: floorMaps0.normalMap, roughnessMap: floorMaps0.roughnessMap,
+      normalScale: new THREE.Vector2(0.7, 0.7),
+    }),
+    crate: new THREE.MeshStandardMaterial({
+      color: WHITE, roughness: 0.85, metalness: 0.0,
+      map: crateMaps0.map, normalMap: crateMaps0.normalMap, roughnessMap: crateMaps0.roughnessMap,
+      normalScale: new THREE.Vector2(1.0, 1.0),
+    }),
+    platform: new THREE.MeshStandardMaterial({
+      color: WHITE, roughness: 0.8, metalness: 0.1,
+      map: platformMaps.map, normalMap: platformMaps.normalMap, roughnessMap: platformMaps.roughnessMap,
+      normalScale: new THREE.Vector2(0.9, 0.9),
+    }),
+    site: new THREE.MeshStandardMaterial({
+      color: WHITE, roughness: 0.6, metalness: 0.2,
+      map: siteMaps.map, normalMap: siteMaps.normalMap, roughnessMap: siteMaps.roughnessMap,
+    }),
+    accent: new THREE.MeshStandardMaterial({
+      color: WHITE, roughness: 0.4, metalness: 0.5,
+      emissive: new THREE.Color(ACCENT), emissiveIntensity: 0.35,
+      map: accentMaps.map, normalMap: accentMaps.normalMap, roughnessMap: accentMaps.roughnessMap,
+    }),
   };
+
+  const MAT_MAPS = {
+    wall: wallMaps, floor: floorMaps0, crate: crateMaps0,
+    platform: platformMaps, site: siteMaps, accent: accentMaps,
+  };
+  // Metres per texture tile, per surface kind: concrete slabs are large, crate planks small.
+  const MAT_TILE = { wall: 4.0, floor: 4.0, crate: 1.4, platform: 2.5, site: 3.0, accent: 2.0 };
 
   const colliders = [];
   const shootables = [];
@@ -43,8 +107,36 @@ export function createWorld(scene) {
     return g;
   }
 
+  // Texture repeat lives on the texture, and materials are shared, so a per-mesh repeat needs a
+  // per-mesh material. Cloning one per box would upload the same canvas dozens of times, so the
+  // repeat is quantised to half-tile steps and materials are cached per (kind, repeat) pair.
+  // The map has ~40 boxes; that collapses to a couple of dozen materials sharing six canvases.
+  const matCache = new Map();
+  function materialFor(kind, a, b) {
+    const qa = Math.max(1, Math.round(a * 2) / 2);
+    const qb = Math.max(1, Math.round(b * 2) / 2);
+    const key = `${kind}|${qa}|${qb}`;
+    let m = matCache.get(key);
+    if (m) return m;
+    const src = mats[kind];
+    m = src.clone();
+    for (const field of ['map', 'normalMap', 'roughnessMap']) {
+      const tex = src[field];
+      if (!tex) continue;
+      const t = tex.clone();
+      t.repeat.set(qa, qb);
+      t.needsUpdate = true;
+      m[field] = t;
+    }
+    matCache.set(key, m);
+    return m;
+  }
+
   function box(w, h, d, x, y, z, mat) {
-    const mesh = new THREE.Mesh(boxGeometry(w, h, d), mats[mat]);
+    const dims = [w, h, d].sort((p, q) => q - p);
+    const tile = MAT_TILE[mat] ?? 3;
+    const material = materialFor(mat, dims[0] / tile, dims[1] / tile);
+    const mesh = new THREE.Mesh(boxGeometry(w, h, d), material);
     mesh.position.set(x, y, z);
     mesh.castShadow = true;
     mesh.receiveShadow = true;
@@ -114,11 +206,12 @@ export function createWorld(scene) {
   rimA.castShadow = false;
   rimB.castShadow = false;
 
-  // Lighting: cool hemisphere for shape, warm key for the shadows that let the geometry read, dim
-  // bounce on the opposite side so nothing goes black.
-  scene.add(new THREE.HemisphereLight(new THREE.Color('#b9cfe4'), new THREE.Color('#2a3038'), 1.55));
+  // Lighting, now that the scene has an environment map and filmic tone mapping: the hemisphere is
+  // dialled back because the IBL already supplies the sky bounce, the key stays for the shadows that
+  // let geometry read, and the fill keeps the far side off black.
+  scene.add(new THREE.HemisphereLight(new THREE.Color('#b9cfe4'), new THREE.Color('#2a3038'), 0.55));
 
-  const key = new THREE.DirectionalLight(new THREE.Color('#ffe9cd'), 2.7);
+  const key = new THREE.DirectionalLight(new THREE.Color('#ffe9cd'), 2.2);
   key.position.set(18, 26, 16);
   key.castShadow = true;
   key.shadow.mapSize.set(2048, 2048);
@@ -128,17 +221,18 @@ export function createWorld(scene) {
   key.shadow.camera.bottom = -40;
   key.shadow.camera.far = 90;
   key.shadow.bias = -0.0009;
+  key.shadow.normalBias = 0.02;
   scene.add(key);
 
-  const fill = new THREE.DirectionalLight(new THREE.Color('#8fb0d6'), 1.05);
+  const fill = new THREE.DirectionalLight(new THREE.Color('#8fb0d6'), 0.55);
   fill.position.set(-16, 14, -20);
   scene.add(fill);
 
   // Each site gets its own light so the pads glow and the map reads from spawn.
-  const siteLightA = new THREE.PointLight(new THREE.Color(ACCENT), 14, 16, 2);
+  const siteLightA = new THREE.PointLight(new THREE.Color(ACCENT), 10, 16, 2);
   siteLightA.position.set(-13.5, 3.2, -24);
   scene.add(siteLightA);
-  const siteLightB = new THREE.PointLight(new THREE.Color(ACCENT), 14, 16, 2);
+  const siteLightB = new THREE.PointLight(new THREE.Color(ACCENT), 10, 16, 2);
   siteLightB.position.set(13.5, 3.2, -24);
   scene.add(siteLightB);
 

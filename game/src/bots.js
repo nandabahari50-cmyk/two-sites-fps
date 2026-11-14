@@ -21,53 +21,46 @@ const tmpVec2 = new THREE.Vector3();
  * world.holdPoints, and `behaviour` decides what it does when it has nothing better to do:
  * 'push' walks its route to the site, 'hold' walks to a hold point and watches a direction.
  */
-export function createBot(scene, world, opts) {
+export function createBot(scene, world, opts, kit) {
   const { side, slot, route, hold, behaviour, weaponId, skill, rand } = opts;
 
-  const group = new THREE.Group();
+  // The body is a jointed operator (operator.js): tapered limbs, plate and fabric, and a real
+  // skeleton, so a moving figure reads as a person instead of a stack of coloured boxes.
+  const operator = kit.createOperator(side);
+  const group = operator.group;
+  const joints = operator.joints;
   scene.add(group);
 
-  // A simple humanoid from boxes: torso, head, two legs, an arm holding the gun. Built once here,
-  // never rebuilt, so no geometry is created in a frame.
-  const skin = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(side === 0 ? '#c96f4a' : '#4a7fc9'),
-    roughness: 0.75, metalness: 0.05,
-  });
-  const gear = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(side === 0 ? '#6d3b28' : '#27406b'),
-    roughness: 0.9, metalness: 0.05,
-  });
-  const gunMat = new THREE.MeshStandardMaterial({ color: new THREE.Color('#1d2126'), roughness: 0.5, metalness: 0.6 });
+  const head = operator.parts.head;
+  const torso = operator.parts.torso;
 
-  const torsoGeo = new THREE.BoxGeometry(0.62, 0.78, 0.36);
-  const headGeo = new THREE.BoxGeometry(0.3, 0.3, 0.3);
-  const limbGeo = new THREE.BoxGeometry(0.2, 0.62, 0.22);
-  const gunGeo = new THREE.BoxGeometry(0.09, 0.12, 0.72);
+  // The weapon the bot carries: a real silhouette rather than a single bar, with a stock, receiver,
+  // magazine, barrel and a handguard the hands can grip.
+  const gunMat = new THREE.MeshStandardMaterial({ color: 0x1a1d21, roughness: 0.45, metalness: 0.7 });
+  const gunAccent = new THREE.MeshStandardMaterial({ color: 0x2b2f35, roughness: 0.6, metalness: 0.4 });
+  const gun = new THREE.Group();
+  const receiver = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.10, 0.40), gunMat);
+  receiver.position.z = -0.02;
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.30, 8), gunMat);
+  barrel.rotation.x = Math.PI / 2;
+  barrel.position.set(0, 0.015, -0.32);
+  const handguard = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.07, 0.22), gunAccent);
+  handguard.position.set(0, 0.005, -0.24);
+  const magazine = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.16, 0.08), gunMat);
+  magazine.position.set(0, -0.12, -0.02);
+  magazine.rotation.x = 0.18;
+  const stock = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.09, 0.22), gunAccent);
+  stock.position.set(0, -0.01, 0.26);
+  const sight = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.045, 0.10), gunAccent);
+  sight.position.set(0, 0.075, -0.02);
+  gun.add(receiver, barrel, handguard, magazine, stock, sight);
+  gun.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; } });
 
-  const torso = new THREE.Mesh(torsoGeo, skin);
-  torso.position.y = 1.16;
-  const head = new THREE.Mesh(headGeo, skin);
-  head.position.y = 1.68;
-  head.userData.part = 'head';
-  const legL = new THREE.Mesh(limbGeo, gear);
-  legL.position.set(-0.18, 0.31, 0);
-  const legR = new THREE.Mesh(limbGeo, gear);
-  legR.position.set(0.18, 0.31, 0);
-  const arm = new THREE.Mesh(limbGeo, skin);
-  arm.position.set(0.34, 1.2, -0.1);
-  arm.rotation.x = -1.35;
-  const gun = new THREE.Mesh(gunGeo, gunMat);
-  gun.position.set(0.34, 1.14, -0.5);
-
-  torso.userData.part = 'torso';
-  legL.userData.part = 'legs';
-  legR.userData.part = 'legs';
-
-  group.add(torso, head, legL, legR, arm, gun);
-  for (const m of [torso, head, legL, legR, arm, gun]) {
-    m.castShadow = true;
-    m.receiveShadow = true;
-  }
+  // The gun rides the right hand, so it follows the arm's aim without its own transform.
+  gun.position.set(0, -0.30, -0.16);
+  joints.armR.elbow.add(gun);
+  // Left hand supports the handguard.
+  joints.armL.elbow.rotation.set(-0.3, 0, 0);
 
   const spawnSet = side === 0 ? world.attackSpawns : world.defendSpawns;
   const spawn = spawnSet[slot % spawnSet.length];
@@ -82,7 +75,10 @@ export function createBot(scene, world, opts) {
     group,
     head,
     torso,
-    legs: [legL, legR],
+    legs: [operator.parts.legs[0], operator.parts.legs[1]],
+    joints,
+    stride: rand ? rand() * 6.28 : 0,
+    idle: rand ? rand() * 6.28 : 0,
     hp: MAX_HP,
     alive: true,
     eyeHeight: EYE,
@@ -122,14 +118,78 @@ export function createBot(scene, world, opts) {
   return bot;
 }
 
-/** Put the meshes where the bot's state says they are. */
-export function syncBot(bot) {
+/** Put the meshes where the bot's state says they are, and animate the joints. */
+export function syncBot(bot, dt = 0) {
   bot.group.position.set(bot.position.x, 0, bot.position.z);
   bot.group.rotation.y = bot.yaw;
   const down = bot.alive ? 0 : Math.min(1, bot.deathTilt);
   bot.group.rotation.x = down * 1.35;
   bot.group.position.y = -down * 0.35;
   bot.group.visible = bot.alive || bot.deathTilt < 1;
+
+  const j = bot.joints;
+  if (!j) return;
+
+  if (!bot.alive) {
+    // A dead operator folds: the whole rig slumps, joints go slack.
+    const t = Math.min(1, bot.deathTilt);
+    j.chest.rotation.x = -0.35 * t;
+    j.head.rotation.x = 0.5 * t;
+    j.legL.hip.rotation.x = 0.5 * t;
+    j.legR.hip.rotation.x = 0.35 * t;
+    j.legL.knee.rotation.x = -0.9 * t;
+    j.legR.knee.rotation.x = -0.7 * t;
+    j.armL.shoulder.rotation.x = -0.6 * t;
+    j.armR.shoulder.rotation.x = -0.4 * t;
+    return;
+  }
+
+  // Walk cycle: the phase advances with distance travelled, so the stride matches the ground speed
+  // instead of sliding. A fast bot steps faster, a standing one holds a breathing idle.
+  bot.stride = (bot.stride ?? 0) + (bot.speed ?? 0) * (dt || 0) * 3.1;
+  bot.idle = (bot.idle ?? Math.random() * 6.28) + (dt || 0) * 1.6;
+  const speed = bot.speed ?? 0;
+  const moving = speed > 0.2;
+  const swing = moving ? Math.min(0.85, 0.30 + speed * 0.16) : 0.0;
+  const phase = bot.stride;
+  const breathe = Math.sin(bot.idle) * 0.02;
+
+  const legSwing = Math.sin(phase) * swing;
+  const legSwing2 = Math.sin(phase + Math.PI) * swing;
+
+  j.legL.hip.rotation.x = legSwing;
+  j.legR.hip.rotation.x = legSwing2;
+  // Knees only bend backwards, and most when the leg is behind.
+  j.legL.knee.rotation.x = -Math.max(0, -Math.sin(phase)) * swing * 1.5;
+  j.legR.knee.rotation.x = -Math.max(0, -Math.sin(phase + Math.PI)) * swing * 1.5;
+
+  // Arms counter-swing, but the right arm is holding the weapon so it stays up.
+  j.armL.shoulder.rotation.x = -0.55 - legSwing * 0.35;
+  j.armL.shoulder.rotation.z = 0.18;
+  j.armR.shoulder.rotation.x = -0.75;
+  j.armR.shoulder.rotation.z = -0.10;
+
+  // Torso leans into a run and turns slightly with the stride; the head holds its aim.
+  j.chest.rotation.x = moving ? -0.12 - Math.min(0.2, speed * 0.02) : breathe;
+  j.chest.rotation.y = Math.sin(phase) * swing * 0.12;
+  j.chest.rotation.z = Math.sin(phase) * swing * 0.05;
+  j.head.rotation.x = -(j.chest.rotation.x) * 0.6 + breathe * 0.5;
+
+  // The hips bob and roll with each step: the single detail that sells a walk.
+  const bob = Math.abs(Math.sin(phase)) * (moving ? 0.045 : 0);
+  j.hips.position.y = 0.92 + bob + breathe * 0.3;
+  j.hips.rotation.y = -Math.sin(phase) * swing * 0.10;
+  j.hips.rotation.z = Math.sin(phase) * swing * 0.06;
+
+  // A crouching bot drops the whole rig and folds the knees.
+  if (bot.crouch) {
+    j.hips.position.y -= 0.30;
+    j.legL.knee.rotation.x -= 0.95;
+    j.legR.knee.rotation.x -= 0.95;
+    j.legL.hip.rotation.x += 0.55;
+    j.legR.hip.rotation.x += 0.55;
+    j.chest.rotation.x -= 0.12;
+  }
 }
 
 /** Reset a bot for a new round: full health, back at spawn, route restarted. */
@@ -184,7 +244,7 @@ export function stepBot(bot, dt, ctx) {
 
   if (!bot.alive) {
     bot.deathTilt = Math.min(1, bot.deathTilt + dt * 3.4);
-    syncBot(bot);
+    syncBot(bot, dt);
     return;
   }
 
@@ -348,7 +408,7 @@ export function stepBot(bot, dt, ctx) {
     }
   }
 
-  syncBot(bot);
+  syncBot(bot, dt);
 }
 
 /** Whether a body of radius r can stand at x,z without being inside a collider. */

@@ -9,7 +9,7 @@ const ATTACK_ROUTES = ['A_long', 'B_long', 'A_short', 'B_short', 'mid'];
 const DEFEND_ROUTES = ['mid', 'A_short', 'B_short', 'A_long', 'B_long'];
 const DEFEND_HOLDS = ['A', 'B', 'mid', 'A', 'B'];
 
-export function createBots(scene, world, rand) {
+export function createBots(scene, world, rand, kit) {
   const bots = [];
 
   // The player holds slot 0 on the attack side, so the team's bots start at slot 1.
@@ -24,7 +24,7 @@ export function createBots(scene, world, rand) {
       skill: 0.55 + rand() * 0.2,
       rand,
       name: NAMES[i + 1],
-    }));
+    }, kit));
   }
 
   for (let i = 0; i < 5; i += 1) {
@@ -38,7 +38,7 @@ export function createBots(scene, world, rand) {
       skill: 0.58 + rand() * 0.22,
       rand,
       name: NAMES[i + 5],
-    }));
+    }, kit));
   }
 
   return bots;

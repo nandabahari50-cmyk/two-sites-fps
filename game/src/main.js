@@ -19,6 +19,8 @@ import { createBots } from './roster.js';
 import { createRound } from './round.js';
 import { createBomb } from './bomb.js';
 import { createState, TEAM, MONEY_KILL, MONEY_CAP } from './state.js';
+import { configureTextures, environmentTexture, panelMaps, fabricMaps } from './textures.js';
+import { createOperatorKit } from './operator.js';
 import { WEAPONS, createWeaponState, equip, startReload, stepWeapon, takeRound, spreadOf, scatter, damageFor } from './weapons.js';
 import { buy, menuHtml, BUY_LIST } from './buy.js';
 import { stepBot } from './bots.js';
@@ -49,6 +51,11 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+// Filmic tone mapping: without it, emissive accents and the key light clip to white and the image
+// reads flat. ACES compresses the highlights so bright surfaces keep their hue.
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.18;
+if (THREE.SRGBColorSpace) renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.getElementById('game').appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -57,32 +64,126 @@ scene.fog = new THREE.Fog(new THREE.Color('#232a33'), 65, 130);
 const camera = new THREE.PerspectiveCamera(76, window.innerWidth / window.innerHeight, 0.05, 200);
 scene.add(camera);
 
+// Image-based lighting. The metalness channel on every material is a lie without an environment to
+// reflect: metallic surfaces would render black. A painted sky is pushed through PMREM once and used
+// as the scene environment, which also gives the surfaces a soft ambient that follows the sky.
+configureTextures(renderer);
+const envTex = environmentTexture(renderer, {
+  sky: [0.34, 0.44, 0.60],
+  horizon: [0.62, 0.59, 0.54],
+  ground: [0.16, 0.15, 0.14],
+  sun: [1.0, 0.90, 0.74],
+});
+scene.environment = envTex;
+scene.environmentIntensity = 0.55;
+
 // The gun in the player's hands lives in its own scene, drawn after the world with the depth buffer
 // cleared, so it never clips into a wall the player is standing against.
 const viewScene = new THREE.Scene();
 const viewCamera = new THREE.PerspectiveCamera(58, window.innerWidth / window.innerHeight, 0.01, 6);
+// The viewmodel has its own environment so the weapon's metal reads: the world env lives on the
+// world scene, and this scene would otherwise sample black on every metalness surface.
+viewScene.environment = envTex;
+viewScene.environmentIntensity = 0.9;
+// Resting distance of the viewmodel from the eye. Closer than the old -0.42 so the hands sit
+// inside the frame instead of hanging off the bottom edge.
+const REST_Z = -0.33;
 const viewGun = new THREE.Group();
 {
-  const bodyMat = new THREE.MeshStandardMaterial({ color: new THREE.Color('#22262b'), roughness: 0.45, metalness: 0.75 });
-  const woodMat = new THREE.MeshStandardMaterial({ color: new THREE.Color('#4a3524'), roughness: 0.75, metalness: 0.1 });
+  // Weapon metal: dark parkerised steel with a roughness map so the highlight breaks along the
+  // receiver instead of reading as one flat bar.
+  const steelMaps = panelMaps({ size: 256, seed: 90, tint: [0.20, 0.21, 0.23] });
+  const bodyMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 0.42, metalness: 0.8,
+    map: steelMaps.map, roughnessMap: steelMaps.roughnessMap, normalMap: steelMaps.normalMap,
+    normalScale: new THREE.Vector2(1.2, 1.2),
+  });
+  const polymerMaps = panelMaps({ size: 256, seed: 92, tint: [0.16, 0.17, 0.18] });
+  const polymerMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 0.78, metalness: 0.12,
+    map: polymerMaps.map, roughnessMap: polymerMaps.roughnessMap, normalMap: polymerMaps.normalMap,
+  });
+  // Gloved hand: fabric maps so the fingers of the grip read at the edge of frame.
+  const gloveMaps = fabricMaps({ size: 128, seed: 94, tint: [0.46, 0.40, 0.31] });
+  const gloveMat = new THREE.MeshStandardMaterial({
+    color: 0xffffff, roughness: 0.9, metalness: 0.02,
+    map: gloveMaps.map, normalMap: gloveMaps.normalMap, roughnessMap: gloveMaps.roughnessMap,
+  });
+  const sleeveMat = new THREE.MeshStandardMaterial({ color: 0x55584e, roughness: 0.95, metalness: 0.02 });
+
   const receiver = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.1, 0.42), bodyMat);
-  const barrel = new THREE.Mesh(new THREE.BoxGeometry(0.045, 0.045, 0.34), bodyMat);
-  barrel.position.set(0, 0.014, -0.36);
-  const stock = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.09, 0.24), woodMat);
-  stock.position.set(0, -0.02, 0.28);
-  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.15, 0.06), woodMat);
-  grip.position.set(0, -0.1, 0.12);
-  grip.rotation.x = 0.3;
-  const mag = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.16, 0.07), bodyMat);
-  mag.position.set(0, -0.11, -0.04);
-  mag.rotation.x = -0.22;
-  viewGun.add(receiver, barrel, stock, grip, mag);
-  viewGun.position.set(0.19, -0.19, -0.42);
+  const receiverTop = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.035, 0.34), polymerMat);
+  receiverTop.position.set(0, 0.062, -0.02);
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.017, 0.017, 0.40, 10), bodyMat);
+  barrel.rotation.x = Math.PI / 2;
+  barrel.position.set(0, 0.014, -0.40);
+  const handguard = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.065, 0.26), polymerMat);
+  handguard.position.set(0, 0.008, -0.30);
+  // Vent slots on the handguard: three thin boxes that read as cut-outs at this distance.
+  for (let i = 0; i < 3; i += 1) {
+    const slot = new THREE.Mesh(new THREE.BoxGeometry(0.062, 0.012, 0.03), bodyMat);
+    slot.position.set(0, 0.03, -0.22 - i * 0.07);
+    viewGun.add(slot);
+  }
+  const stock = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.09, 0.26), polymerMat);
+  stock.position.set(0, -0.012, 0.30);
+  const cheek = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.03, 0.18), polymerMat);
+  cheek.position.set(0, 0.045, 0.30);
+  const grip = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.16, 0.07), polymerMat);
+  grip.position.set(0, -0.11, 0.13);
+  grip.rotation.x = 0.32;
+  const mag = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.18, 0.08), polymerMat);
+  mag.position.set(0, -0.13, -0.04);
+  mag.rotation.x = -0.20;
+  const sightRear = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.04, 0.03), bodyMat);
+  sightRear.position.set(0, 0.085, 0.10);
+  const sightFront = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.045, 0.025), bodyMat);
+  sightFront.position.set(0, 0.095, -0.36);
+  viewGun.add(receiver, receiverTop, barrel, handguard, stock, cheek, grip, mag, sightRear, sightFront);
+
+  // Right hand on the grip, left hand on the handguard: two gloved blocks and a forearm each, so the
+  // weapon is held rather than floating.
+  // The forearm is what reaches toward the camera: it runs +z (back toward the shooter) from the
+  // hand, so the arms occupy the lower corners of the frame the way a held weapon does.
+  function hand(x, y, z, rotX, rotY) {
+    const g = new THREE.Group();
+    const palm = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.10, 0.085), gloveMat);
+    const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.05, 0.05), gloveMat);
+    thumb.position.set(-0.045, 0.02, -0.02);
+    const fingers = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.055, 0.06), gloveMat);
+    fingers.position.set(0, 0.055, -0.03);
+    const wrist = new THREE.Mesh(new THREE.CylinderGeometry(0.042, 0.048, 0.07, 8), sleeveMat);
+    wrist.rotation.x = Math.PI / 2;
+    wrist.position.set(0, -0.045, 0.06);
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.085, 0.30), sleeveMat);
+    arm.position.set(0, -0.03, 0.22);
+    arm.rotation.x = -0.22;
+    g.add(palm, thumb, fingers, wrist, arm);
+    g.position.set(x, y, z);
+    g.rotation.set(rotX, rotY, 0);
+    g.traverse((o) => { if (o.isMesh) o.castShadow = false; });
+    return g;
+  }
+  const gripHand = hand(0, -0.05, 0.06, 0.26, 0);
+  gripHand.userData.probe = 'hand';
+  const guardHand = hand(0, -0.045, -0.24, -0.10, 0);
+  guardHand.userData.probe = 'hand';
+  viewGun.add(gripHand, guardHand);
+
+  // Framing: the camera sees y ∈ ±0.17 at z = -0.35, so the grip and the guard hand have to sit
+  // inside that band or they fall off the bottom of the screen. The gun is raised and pushed
+  // forward until both hands are in frame, and the arms run back toward the camera below them.
+  viewGun.position.set(0.105, -0.020, REST_Z);
+  viewGun.rotation.set(0.012, -0.045, 0.01);
   viewScene.add(viewGun);
+
   const vLight = new THREE.DirectionalLight(new THREE.Color('#ffe6c4'), 2.6);
   vLight.position.set(0.6, 1, 0.8);
   viewScene.add(vLight);
-  viewScene.add(new THREE.HemisphereLight(new THREE.Color('#a8c0d8'), new THREE.Color('#20242a'), 1.1));
+  const vFill = new THREE.DirectionalLight(new THREE.Color('#7f9dc4'), 0.8);
+  vFill.position.set(-0.8, 0.3, 0.5);
+  viewScene.add(vFill);
+  viewScene.add(new THREE.HemisphereLight(new THREE.Color('#a8c0d8'), new THREE.Color('#20242a'), 0.7));
 }
 
 // --- Systems ---
@@ -97,7 +198,8 @@ player.weaponState = createWeaponState('sidearm');
 player.armour = 100;
 
 const state = createState(world);
-const bots = createBots(scene, world, rand);
+const operatorKit = createOperatorKit(renderer);
+const bots = createBots(scene, world, rand, operatorKit);
 const round = createRound(world, { state, player, bots, hud });
 const bomb = createBomb(scene, world);
 
@@ -186,7 +288,7 @@ function firePlayer() {
   if (hitSomething) hud.hitMarker(killedSomething);
   const kick = def.recoil * (crouched ? 0.7 : 1);
   player.recoil(kick, (rand() * 2 - 1) * def.recoil * 0.55);
-  viewGun.position.z = -0.37;
+  viewGun.position.z = REST_Z + 0.03;
 }
 
 function botShoot(bot, jitter) {
@@ -361,7 +463,7 @@ function frame(now) {
   if (!paused) {
     renderer.autoClear = false;
     renderer.clearDepth();
-    viewGun.position.z += (-0.42 - viewGun.position.z) * Math.min(1, elapsed * 12);
+    viewGun.position.z += (-REST_Z - viewGun.position.z) * Math.min(1, elapsed * 12);
     renderer.render(viewScene, viewCamera);
     renderer.autoClear = true;
   }
@@ -453,12 +555,40 @@ function runShot(name) {
     for (let i = 0; i < 20; i += 1) stepSim(FIXED_STEP);
   }
 
+
+  // Measurement bridge, used only by tools/probe_view.py while a shot is being framed: it reports
+  // where the viewmodel's parts land in clip space, so a transform can be corrected by arithmetic
+  // instead of by eye. Harmless outside a shot because nothing reads it.
+  window.__probe = () => {
+    const out = { restZ: REST_Z, gunPos: viewGun.position.toArray(),
+                  gunRot: [viewGun.rotation.x, viewGun.rotation.y, viewGun.rotation.z], parts: [] };
+    const camFov = viewCamera.fov * Math.PI / 180;
+    const depth = -viewGun.position.z;
+    out.frameHalfHeight = Math.tan(camFov / 2) * depth;
+    out.frameHalfWidth = out.frameHalfHeight * viewCamera.aspect;
+    const v = new THREE.Vector3();
+    viewGun.updateMatrixWorld(true);
+    viewGun.traverse((o) => {
+      if (!o.isGroup && !o.isMesh) return;
+      if (!o.userData || !o.userData.probe) return;
+      o.getWorldPosition(v);
+      const p = v.clone().project(viewCamera);
+      out.parts.push({
+        name: o.userData.probe,
+        world: [round3(v.x), round3(v.y), round3(v.z)],
+        ndc: [round3(p.x), round3(p.y), round3(p.z)],
+        onScreen: Math.abs(p.x) <= 1 && Math.abs(p.y) <= 1 && p.z > -1 && p.z < 1,
+      });
+    });
+    return out;
+  };
+  function round3(n) { return Math.round(n * 1000) / 1000; }
+
   let painted = 0;
   function paint() {
     requestAnimationFrame(paint);
     player.applyCamera(camera);
-    updateHud(FIXED_STEP);
-    renderer.render(scene, camera);
+    updateHud(FIXED_STEP);    renderer.render(scene, camera);
     renderer.autoClear = false;
     renderer.clearDepth();
     renderer.render(viewScene, viewCamera);
