@@ -585,8 +585,18 @@ function runShot(name) {
       camera.getWorldPosition(eyePoint);
       const fxMuzzle = eyePoint.clone().addScaledVector(aimDir, 0.55);
       fxMuzzle.y -= 0.12;
-      const fxHit = eyePoint.clone().addScaledVector(wallDir, 4.2);
-      effects.gunshot(fxMuzzle, fxHit, wallDir.clone().negate(), { strength: 1.0, sparks: 22, viewMuzzle: viewMuzzlePoint });
+      // Raycast so the impact sits on a real wall instead of a blind 4.2 m guess that could fall
+      // inside (or behind) geometry and get fully occluded by it.
+      raycaster.set(eyePoint, wallDir);
+      const wallHits = raycaster.intersectObjects(shootables, false);
+      const wi = wallHits[0];
+      const fxHit = wi
+        ? wi.point.clone()
+        : eyePoint.clone().addScaledVector(wallDir, 4.2);
+      const fxNormal = wi && wi.face
+        ? wi.face.normal.clone().transformDirection(wi.object.matrixWorld).normalize()
+        : wallDir.clone().negate();
+      effects.gunshot(fxMuzzle, fxHit, fxNormal, { strength: 1.0, sparks: 22, viewMuzzle: viewMuzzlePoint });
     }
     hud.kill('you', 'Rook', true);
     hud.banner('SITE A', 99);

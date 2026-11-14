@@ -160,7 +160,44 @@ export function createEffects(scene, viewScene = null) {
     m.visible = true;
   }
 
-  // --- tracers: short streaks from the muzzle to the hit -------------------
+  // --- impact flash: brief bright pops where rounds land --------------------
+  // Where the muzzle flash is about the gun, this is about the far end of the tracer. A tiny additive
+  // sphere plus a point light at the hit reads as a thump against a wall/armour and, with the sparks,
+  // ties the muzzle to the impact in one visual motion.
+  const IMPACT_COUNT = 8;
+  const impactCoreMat = new THREE.MeshBasicMaterial({
+    color: 0xfff2d8, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  const impactHaloMat = new THREE.MeshBasicMaterial({
+    color: 0xff9a3c, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false,
+  });
+  // Round-robin now, so the newest impact is always the brightest and the noise stays bounded.
+  const impacts = [];
+  for (let i = 0; i < IMPACT_COUNT; i += 1) {
+    const core = new THREE.Mesh(new THREE.SphereGeometry(0.032, 10, 8), impactCoreMat);
+    const halo = new THREE.Mesh(new THREE.SphereGeometry(0.12, 12, 10), impactHaloMat);
+    const light = new THREE.PointLight(0xffc880, 0, 5, 1.6);
+    const g = new THREE.Group();
+    g.add(core, halo, light);
+    g.visible = false;
+    scene.add(g);
+    impacts.push({ group: g, core, halo, light, ttl: 0, life: 0.06 });
+  }
+  let impactCursor = 0;
+
+  function impactFlash(point, normal, strength = 1) {
+    const s = impacts[impactCursor];
+    impactCursor = (impactCursor + 1) % IMPACT_COUNT;
+    s.group.position.copy(point).addScaledVector(normal, 0.03);
+    s.group.visible = true;
+    s.life = 0.06;
+    s.ttl = s.life;
+    s.core.scale.setScalar(strength);
+    s.halo.scale.setScalar(strength);
+    s.core.material.opacity = 1;
+    s.halo.material.opacity = 0.85;
+    s.light.intensity = 8 * strength;
+  }
   const traceGeo = new THREE.BufferGeometry();
   const tracePos = new Float32Array(2 * 3 * 12);
   traceGeo.setAttribute('position', new THREE.BufferAttribute(tracePos, 3));
@@ -192,6 +229,7 @@ export function createEffects(scene, viewScene = null) {
       tracer(muzzle, hitPoint);
       const n = hitNormal ?? dir.clone().negate();
       emitSparks(hitPoint, n, opts.sparks ?? 10, opts.tint ?? [1.0, 0.78, 0.44]);
+      impactFlash(hitPoint, n, opts.impact ?? 1);
       bulletHole(hitPoint, n);
     }
   }
@@ -249,6 +287,17 @@ export function createEffects(scene, viewScene = null) {
         traceGeo.setDrawRange(0, 0);
       }
     }
+
+    // Impact flashes.
+    for (const s of impacts) {
+      if (s.ttl <= 0) continue;
+      s.ttl -= dt;
+      const k = Math.max(0, s.ttl / s.life);
+      s.core.material.opacity = k * k;
+      s.halo.material.opacity = 0.85 * k;
+      s.light.intensity = 8 * k * k;
+      if (s.ttl <= 0) s.group.visible = false;
+    }
   }
 
   function clear() {
@@ -259,6 +308,7 @@ export function createEffects(scene, viewScene = null) {
     traceGeo.setDrawRange(0, 0);
     for (const slot of flashLights) { slot.ttl = 0; slot.light.visible = false; }
     flashGroup.visible = false;
+    for (const s of impacts) { s.ttl = 0; s.group.visible = false; }
     for (const m of holes) m.visible = false;
   }
 
@@ -274,8 +324,9 @@ export function createEffects(scene, viewScene = null) {
       coreOpacity: coreMat.opacity,
       holesVisible: holes.filter((m) => m.visible).length,
       tracerSegments: traceGeo.drawRange.count / 2,
+      impactsOn: impacts.filter((s) => s.ttl > 0).length,
     };
   }
 
-  return { gunshot, muzzleFlash, bulletHole, emitSparks, update, clear, debugState };
+  return { gunshot, muzzleFlash, bulletHole, emitSparks, impactFlash, update, clear, debugState };
 }
