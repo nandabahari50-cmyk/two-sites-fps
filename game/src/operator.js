@@ -46,10 +46,13 @@ export function createOperatorKit(renderer) {
   const plateMaps = panelMaps({ seed: 105, tint: [0.30, 0.32, 0.35] });
   const kitMaps = { fabricAttack, fabricDefend, plateMaps };
 
-  function fabric(side) {
+  function fabric(side, variant = 0) {
     const src = side === 0 ? fabricAttack : fabricDefend;
+    // A small per-bot brightness swing from the same texture, so a squad is not a run of clones at a
+    // distance. The texture is tinted once; the colour multiplier shifts it per operator, cheaply.
+    const V = [0xffffff, 0xd8d2c8, 0xc4c9d2, 0xe0d6c4];
     return new THREE.MeshStandardMaterial({
-      color: 0xffffff, roughness: 0.92, metalness: 0.03,
+      color: V[variant % V.length], roughness: 0.92, metalness: 0.03,
       map: src.map, normalMap: src.normalMap, roughnessMap: src.roughnessMap,
       normalScale: new THREE.Vector2(0.9, 0.9),
     });
@@ -65,6 +68,16 @@ export function createOperatorKit(renderer) {
     color: SKIN_TONE[side === 0 ? 'attack' : 'defend'], roughness: 0.72, metalness: 0.0,
   });
   const rubberMat = new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.85, metalness: 0.05 });
+
+  // Team accent: a high-visibility stripe so friend and foe read at a glance, even in the darkest
+  // corner of a site. Attackers run hot orange, defenders cold blue. The emissive term keeps it
+  // visible under the image-based light where a purely diffuse stripe would sink into shadow.
+  const accentMat = (side) => new THREE.MeshStandardMaterial({
+    color: side === 0 ? 0xff5a1f : 0x29b6ff,
+    roughness: 0.45, metalness: 0.25,
+    emissive: side === 0 ? 0x641600 : 0x00334f,
+    emissiveIntensity: 0.85,
+  });
 
   // Shared geometry: built once, reused by every operator.
   const geo = {
@@ -84,16 +97,20 @@ export function createOperatorKit(renderer) {
     kneePad: plate(0.20, 0.16, 0.22),
     vest: plate(0.54, 0.44, 0.30),
     pouch: plate(0.16, 0.12, 0.10),
+    helmetStripe: plate(0.31, 0.045, 0.33),
+    shoulderStripe: plate(0.205, 0.05, 0.31),
+    armband: plate(0.16, 0.07, 0.165),
   };
 
   /**
    * Build one operator. Returns the group plus the named joints the animation writes to.
    * `side` 0 = attacker, 1 = defender.
    */
-  function createOperator(side) {
+  function createOperator(side, variant = 0) {
     const root = new THREE.Group();
-    const cloth = fabric(side);
+    const cloth = fabric(side, variant);
     const skin = skinMat(side);
+    const accent = accentMat(side);
 
     // --- lower body: hips are the root of the leg chain ---
     const hips = new THREE.Group();
@@ -163,6 +180,10 @@ export function createOperatorKit(renderer) {
     const helmet = new THREE.Mesh(geo.helmet, plateMat);
     helmet.position.y = 0.14;
     head.add(helmet);
+    // A team stripe over the crown: the first thing the eye finds when a bot peeks a corner.
+    const helmetStripe = new THREE.Mesh(geo.helmetStripe, accent);
+    helmetStripe.position.set(0, 0.235, 0);
+    head.add(helmetStripe);
     const visor = new THREE.Mesh(geo.visor, rubberMat);
     visor.position.set(0, 0.06, 0.16);
     head.add(visor);
@@ -173,9 +194,19 @@ export function createOperatorKit(renderer) {
       const pad = new THREE.Mesh(geo.shoulder, plateMat);
       pad.position.y = 0.02;
       shoulder.add(pad);
+      // A matching accent on each shoulder, so the team reads from the silhouette even face-on.
+      const shoulderStripe = new THREE.Mesh(geo.shoulderStripe, accent);
+      shoulderStripe.position.set(0, 0.04, 0);
+      shoulder.add(shoulderStripe);
       const upper = new THREE.Mesh(geo.upperArm, cloth);
       upper.position.y = -0.17;
       shoulder.add(upper);
+      // A narrow armband low on the bicep, on this arm only: the other stays plain.
+      if (sign < 0) {
+        const armband = new THREE.Mesh(geo.armband, accent);
+        armband.position.set(0, -0.16, 0);
+        shoulder.add(armband);
+      }
       const elbow = new THREE.Group();
       elbow.position.y = -0.34;
       shoulder.add(elbow);
@@ -206,5 +237,5 @@ export function createOperatorKit(renderer) {
     };
   }
 
-  return { createOperator, geo, plateMat, rubberMat, fabric, skinMat };
+  return { createOperator, geo, plateMat, rubberMat, fabric, skinMat, accentMat };
 }

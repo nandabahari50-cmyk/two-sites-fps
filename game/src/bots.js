@@ -26,7 +26,7 @@ export function createBot(scene, world, opts, kit) {
 
   // The body is a jointed operator (operator.js): tapered limbs, plate and fabric, and a real
   // skeleton, so a moving figure reads as a person instead of a stack of coloured boxes.
-  const operator = kit.createOperator(side);
+  const operator = kit.createOperator(side, slot % 4);
   const group = operator.group;
   const joints = operator.joints;
   scene.add(group);
